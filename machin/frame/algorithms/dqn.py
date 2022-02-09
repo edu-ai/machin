@@ -51,9 +51,10 @@ class DQN(TorchFramework):
         mode: str = "double",
         visualize: bool = False,
         visualize_dir: str = "",
+        momentum: float =  1, 
+        weight_decay: float= 1,
         **__,
-        momentum= 1, 
-        weight_decay=1,
+        
     ):
         """
         Note:
