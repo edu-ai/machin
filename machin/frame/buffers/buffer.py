@@ -398,6 +398,11 @@ class Buffer:
             or tensor depends on your data (if concatenate),
             or original batch (if not concatenate).
         """
+        batch_t = []
+        for t in batch: 
+            if(t is not None ): 
+                batch_t.append(t)
+        batch = batch_t
         if concatenate and len(batch) != 0:
             item = batch[0]
             batch_size = len(batch)

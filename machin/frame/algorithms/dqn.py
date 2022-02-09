@@ -6,6 +6,7 @@ import numpy as np
 
 from machin.frame.buffers.buffer import Buffer
 from machin.frame.transition import Transition
+from torchvision import transforms
 from machin.model.nets.base import NeuralNetworkModule
 from .base import TorchFramework, Config
 from .utils import (
@@ -51,6 +52,8 @@ class DQN(TorchFramework):
         visualize: bool = False,
         visualize_dir: str = "",
         **__,
+        momentum= 1, 
+        weight_decay=1,
     ):
         """
         Note:
@@ -188,12 +191,16 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
             self.qnet_target = qnet
         else:
             self.qnet_target = qnet_target
-        self.qnet_optim = optimizer(self.qnet.parameters(), lr=learning_rate)
-        self.replay_buffer = (
+        try: 
+            self.qnet_optim = optimizer(self.qnet.parameters(), lr=learning_rate,momentum=momentum, weight_decay=weight_decay)
+        except: 
+            self.qnet_optim = optimizer(self.qnet.parameters(), lr=learning_rate)
+
+        self.replay_buffer = [
             Buffer(replay_size, replay_device)
             if replay_buffer is None
             else replay_buffer
-        )
+        ]
 
         # Make sure target and online networks have the same weight
         with t.no_grad():
@@ -226,6 +233,26 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
             return [self.qnet_lr_sch]
         return []
 
+    def act(self, state: Dict[str, Any], use_target: bool = False, **__):
+            """
+            Use Q network to produce a discrete action for
+            the current state.
+
+            Args:
+                state: Current state.
+                use_target: Whether to use the target network.
+
+            Returns:
+                Action of shape ``[batch_size, 1]``.
+                Any other things returned by your Q network. if they exist.
+            """
+            if use_target:
+                result, *others = safe_call(self.qnet_target, state)
+            else:
+                result, *others = safe_call(self.qnet, state)
+
+            return result
+    
     def act_discrete(self, state: Dict[str, Any], use_target: bool = False, **__):
         """
         Use Q network to produce a discrete action for
@@ -250,6 +277,10 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
         else:
             return (result, *others)
 
+
+    def apply_transform(self,s):
+        transform = transforms.ToTensor()
+        return transform(s).unsqueeze(0)
     def act_discrete_with_noise(
         self,
         state: Dict[str, Any],
@@ -353,6 +384,7 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
             sample_method="random_unique",
             sample_attrs=["state", "action", "reward", "next_state", "terminal", "*"],
         )
+
         self.qnet.train()
         if self.mode == "vanilla":
             # Vanilla DQN, directly optimize q network.
@@ -424,29 +456,47 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
             # value, but instead of selecting the maximum Q(s,a), it uses
             # the online DQN network to select an action and return Q(s,a'), to
             # reduce the over estimation.
-            q_value = self._criticize(state)
+            q_value = self._criticize(state) # (32, 4, 96, 96)
 
             # gather requires long tensor, int32 is not accepted
-            action_value = q_value.gather(
-                dim=1,
-                index=self.action_get_function(action).to(
-                    device=q_value.device, dtype=t.long
-                ),
-            )
+            
+            #action_value = q_value.gather(
+            #    dim=1,
+            #    index=self.action_get_function(action).to(
+            #        device=q_value.device, dtype=t.long
+            #    ),
+            #) 
+            #action_batch = t.tensor(action, dtype=t.long).to(q_value.device) 
+            #reward_batch = t.tensor(batch.reward, dtype=t.float32).to(device)  # (32,)
+
+            #non_final_next_states = t.cat([self.apply_transform(s) for s in next_state if s is not None]).to(device, non_blocking=True)  # (<=32, 4, 96, 96)
+
+            state_action_values = q_value.view(self.batch_size, -1).gather(1, action.unsqueeze(1)).squeeze(1)  # (32,)
+
+            next_state_values = torch.zeros(self.batch_size, dtype=t.float32, device=q_value.device)  # (32,)
+            non_final_mask = t.tensor(tuple(map(lambda s: s is not None, next_state)), dtype=torch.bool, device=q_value.device)  # (32,)
+
 
             with t.no_grad():
                 target_next_q_value = self._criticize(next_state, True)
+                best_action = self._criticize(next_state).view(next_state.size(0), -1).max(1)[1].view(next_state.size(0), 1)  # (<=32, 1)
+                next_state_values[non_final_mask] = target_next_q_value.view(next_state.size(0), -1).gather(1, best_action).view(-1)  # (<=32,)
+                
+                '''
                 next_action = self._act_discrete(next_state).to(
                     device=q_value.device, dtype=t.long
                 )
                 target_next_q_value = target_next_q_value.gather(
                     dim=1, index=next_action
                 )
+                '''
+            
 
-            y_i = self.reward_function(
-                reward, self.discount, target_next_q_value, terminal, others
-            )
-            value_loss = self.criterion(action_value, y_i.type_as(action_value))
+            #y_i = self.reward_function(
+            #    reward, self.discount, target_next_q_value, terminal, others
+            #)
+            expected_state_action_values = (reward + discount * next_state_values)  # (32
+            value_loss = self.criterion(next_state_values, expected_state_action_values)#y_i.type_as(action_value))
 
             if self.visualize:
                 self.visualize_model(value_loss, "qnet", self.visualize_dir)
