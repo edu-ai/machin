@@ -20,6 +20,7 @@ from .utils import (
 )
 
 
+
 class DQN(TorchFramework):
     """
     DQN framework.
@@ -197,11 +198,11 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
         except: 
             self.qnet_optim = optimizer(self.qnet.parameters(), lr=learning_rate)
 
-        self.replay_buffer = [
+        self.replay_buffer = (
             Buffer(replay_size, replay_device)
             if replay_buffer is None
             else replay_buffer
-        ]
+        )
 
         # Make sure target and online networks have the same weight
         with t.no_grad():
