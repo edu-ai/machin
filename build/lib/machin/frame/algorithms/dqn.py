@@ -3,11 +3,12 @@ from copy import deepcopy
 import torch as t
 import torch.nn as nn
 import numpy as np
-
+import random
 from machin.frame.buffers.buffer import Buffer
-from machin.frame.transition import Transition
+#from machin.frame.transition import Transition
 from torchvision import transforms
 from machin.model.nets.base import NeuralNetworkModule
+from collections import namedtuple
 from .base import TorchFramework, Config
 from .utils import (
     hard_update,
@@ -20,6 +21,29 @@ from .utils import (
 )
 from torch.nn.functional import smooth_l1_loss
 
+
+Transition_n = namedtuple('Transition', ('state', 'action', 'reward', 'next_state'))
+Transition= namedtuple('Transition', ('state', 'action', 'reward', 'next_state'))
+
+
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.buffer = []
+        self.position = 0
+
+    def push(self, *args):
+        if len(self.buffer) < self.capacity:
+            self.buffer.append(None)
+        self.buffer[self.position] = Transition_n(*args)
+        self.position = (self.position + 1) % self.capacity
+
+    def sample(self, batch_size):
+        transitions = random.sample(self.buffer, batch_size)
+        return Transition_n(*zip(*transitions))
+
+    def __len__(self):
+        return len(self.buffer)
 
 class DQN(TorchFramework):
     """
@@ -199,11 +223,8 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
         except : 
             self.qnet_optim = optimizer(self.qnet.parameters(), lr=learning_rate)
             print("failure")
-        self.replay_buffer = (
-            Buffer(replay_size, replay_device)
-            if replay_buffer is None
-            else replay_buffer
-        )
+        
+        self.replay_buffer = ReplayBuffer(replay_size)
 
         # Make sure target and online networks have the same weight
         with t.no_grad():
@@ -379,24 +400,16 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
             mean value of estimated policy value, value loss
         """
         device = t.device('cuda' if t.cuda.is_available() else 'cpu')
-        (
-            batch_size,
-            (state, action, reward, next_state, terminal, others,),
-        ) = self.replay_buffer.sample_batch(
-            self.batch_size,
-            concatenate_samples,
-            sample_method="random_unique",
-            sample_attrs=["state", "action", "reward", "next_state", "terminal", "*"],
-            device= device
-        )
-        action = action["action"] 
+        
+        batch = self.replay_buffer.sample(self.batch_size)
+
         # print("reward",terminal)
         #terminal  = terminal["terminal"] 
         #reward = reward["reward"]
         #print("reward",reward)
         #print("action",action.keys,type(action["action"]))
         #print("reward",reward)
-        self.qnet.train()
+        #self.qnet.train()
         if self.mode == "vanilla":
             # Vanilla DQN, directly optimize q network.
             # target network is the same as the main network
@@ -467,14 +480,14 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
             # the online DQN network to select an action and return Q(s,a'), to
             # reduce the over estimation.
             #print(next_state.keys())
-            print("state length:",len(state["state"]), " action length:",len(action)," reward length:", len(reward), " next state length: ",len(next_state["next_state"]))
+            #print("state length:",len(batch.state), " action length:",len(batch.action)," reward length:", len(batch.reward), " next state length: ",len(batch.next_state))
+            
             device = t.device('cuda' if t.cuda.is_available() else 'cpu')
-            state_batch = t.cat([s  for s in state["state"]]).to(device)
-            #state = {"state":state1}
-            action = t.tensor(action, dtype=t.long).to(device)  # (32,)
-            reward = t.tensor(reward, dtype=t.float32).to(device)  # (32,)
-            non_final_next_states = t.cat([s for s in next_state["next_state"] if s is not None]).to(device, non_blocking=True)  # (<=32, 4, 96, 96)
-            print(state_batch.size(),action.size(),reward.size(),non_final_next_states.size())
+            state_batch = t.cat([self.apply_transform(s) for s in batch.state]).to(device)  # (32, 4, 96, 96)
+            action_batch = t.tensor(batch.action, dtype=t.long).to(device)  # (32,)
+            reward_batch = t.tensor(batch.reward, dtype=t.float32).to(device)  # (32,)
+            non_final_next_states = t.cat([self.apply_transform(s) for s in batch.next_state if s is not None]).to(device, non_blocking=True)  # (<=32, 4, 96, 96)
+            #print(state_batch.size(),action_batch.size(),reward_batch.size(),non_final_next_states.size())
             output = self.qnet(state_batch) 
             #next_state2 = {"state": non_final_next_states}
             #print(type(action),type(state))
@@ -492,25 +505,25 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
             #reward_batch = t.tensor(batch.reward, dtype=t.float32).to(device)  # (32,)
 
             #non_final_next_states = t.cat([self.apply_transform(s) for s in next_state if s is not None]).to(device, non_blocking=True)  # (<=32, 4, 96, 96)
-            state_action_values = output.view(self.batch_size, -1).gather(1, action.unsqueeze(1)).squeeze(1)  # (32,)
+            state_action_values = output.view(self.batch_size, -1).gather(1, action_batch.unsqueeze(1)).squeeze(1)  # (32,)
 
             next_state_values = t.zeros(self.batch_size, dtype=t.float32, device=device)  # (32,)
-            non_final_mask = t.tensor(tuple(map(lambda s: s is not None, next_state["next_state"])), dtype=t.bool, device=device)  # (32,)
+            non_final_mask = t.tensor(tuple(map(lambda s: s is not None, batch.next_state)), dtype=t.bool, device=device)  # (32,)
 
 
-            #with t.no_grad():
+            with t.no_grad():
             #target_next_q_value = self._criticize(, True)
-            best_action = self.qnet(non_final_next_states).view(non_final_next_states.size(0), -1).max(1)[1].view(non_final_next_states.size(0), 1)  # (<=32, 1)
-            next_state_values[non_final_mask] = self.qnet_target(non_final_next_states).view(non_final_next_states.size(0), -1).gather(1, best_action).view(-1)  # (<=32,)
+                best_action = self.qnet(non_final_next_states).view(non_final_next_states.size(0), -1).max(1)[1].view(non_final_next_states.size(0), 1)  # (<=32, 1)
+                next_state_values[non_final_mask] = self.qnet_target(non_final_next_states).view(non_final_next_states.size(0), -1).gather(1, best_action).view(-1)  # (<=32,)
                 
             
 
             #y_i = self.reward_function(
             #    reward, self.discount, target_next_q_value, terminal, others
             #)
-            expected_state_action_values = (reward + self.discount * next_state_values)  # (32
+            expected_state_action_values = (reward_batch + self.discount * next_state_values)  # (32
             td_error = t.abs(state_action_values - expected_state_action_values).detach()  # (32,)
-            value_loss = smooth_l1_loss(next_state_values, expected_state_action_values)#y_i.type_as(action_value))
+            value_loss = smooth_l1_loss(state_action_values, expected_state_action_values)#y_i.type_as(action_value))
 
 
             if self.visualize:
@@ -535,9 +548,9 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
         else:
             raise ValueError(f"Unknown DQN mode: {self.mode}")
 
-        self.qnet.eval()
+        #self.qnet.eval()
         # use .item() to prevent memory leakage
-        return value_loss.item()
+        #return value_loss.item()
 
     def update_lr_scheduler(self):
         """
