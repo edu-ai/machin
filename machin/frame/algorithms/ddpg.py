@@ -3,10 +3,12 @@ from copy import deepcopy
 from torch.distributions import Categorical
 import torch as t
 import torch.nn as nn
+import random
 import numpy as np
-
+from collections import namedtuple
 from machin.frame.buffers.buffer import Buffer
-from machin.frame.transition import Transition
+from torchvision import transforms
+#from machin.frame.transition import Transition
 from machin.frame.noise.action_space_noise import (
     add_normal_noise_to_action,
     add_clipped_normal_noise_to_action,
@@ -27,6 +29,10 @@ from .utils import (
     assert_and_get_valid_lr_scheduler,
 )
 
+Transition_n = namedtuple('Transition', ('state', 'action', 'reward', 'next_state'))
+Transition= namedtuple('Transition', ('state', 'action', 'reward', 'next_state'))
+
+
 class ReplayBuffer:
     def __init__(self, capacity):
         self.capacity = capacity
@@ -36,12 +42,12 @@ class ReplayBuffer:
     def push(self, *args):
         if len(self.buffer) < self.capacity:
             self.buffer.append(None)
-        self.buffer[self.position] = Transition(*args)
+        self.buffer[self.position] = Transition_n(*args)
         self.position = (self.position + 1) % self.capacity
 
     def sample(self, batch_size):
         transitions = random.sample(self.buffer, batch_size)
-        return Transition(*zip(*transitions))
+        return Transition_n(*zip(*transitions))
 
     def __len__(self):
         return len(self.buffer)
@@ -457,13 +463,12 @@ class DDPG(TorchFramework):
         batch = self.replay_buffer.sample(self.batch_size)
 
         device = t.device('cuda' if t.cuda.is_available() else 'cpu')
-        state_batch = torch.cat([self.apply_transform(s) for s in batch.state]).to(device)  # (32, 4, 96, 96)
-        action_batch = torch.tensor(batch.action, dtype=t.long).to(device)  # (32,)
-        reward_batch = torch.tensor(batch.reward, dtype=t.float32).to(device)  # (32,)
-        non_final_next_states = torch.cat([self.apply_transform(s) for s in batch.next_state if s is not None]).to(device, non_blocking=True)  # (<=32, 4, 96, 96)
+        state_batch = t.cat([self.apply_transform(s) for s in batch.state]).to(device)  # (32, 4, 96, 96)
+        action_batch = t.tensor(batch.action, dtype=t.long).to(device)  # (32,)
+        reward_batch = t.tensor(batch.reward, dtype=t.float32).to(device)  # (32,)
+        non_final_next_states = t.cat([self.apply_transform(s) for s in batch.next_state if s is not None]).to(device, non_blocking=True)  # (<=32, 4, 96, 96)
         next_state_values = t.zeros(self.batch_size, dtype=t.float32, device=device)  # (32,)
         non_final_mask = t.tensor(tuple(map(lambda s: s is not None, batch.next_state)), dtype=t.bool, device=device)  # (32,)
-
 
         # Update critic network first.
         # Generate value reference :math: `y_i` using target actor and
@@ -473,15 +478,17 @@ class DDPG(TorchFramework):
             #    self._act(next_state, True), next_state, others
             #)
             next_action = self.actor_target(non_final_next_states)
-            next_state_values[non_final_mask]  = self.critic_target(non_final_next_states,next_action).view(batch_size,-1)
+            #print(next_action)
+            next_state_values[non_final_mask]  = self.critic_target(non_final_next_states,next_action).view(-1)
             #next_value = self._criticize(next_state, next_action, True)
+            #print(next_state_values)
             #next_value = next_value.view(batch_size, -1)
             y_i = (reward_batch + self.discount * next_state_values)
             #y_i = self.reward_function(
             #    reward, self.discount, next_value, terminal, others
             #)
 
-        cur_value = self.critic(state_batch,action_batch) #self._criticize(state, action)
+        cur_value = self.critic(state_batch,action_batch).view(-1) #self._criticize(state, action)
         value_loss = self.criterion(cur_value, y_i.type_as(cur_value))
 
         if self.visualize:
@@ -495,7 +502,7 @@ class DDPG(TorchFramework):
 
         # Update actor network
         cur_action =  self.actor(state_batch) #self.action_transform_function(self._act(state), state, others)
-        act_value, *_ = self.critic(state,cur_action) #self._criticize(state, cur_action)
+        act_value, *_ = self.critic(state_batch,cur_action) #self._criticize(state, cur_action)
 
         # "-" is applied because we want to maximize J_b(u),
         # but optimizer workers by minimizing the target

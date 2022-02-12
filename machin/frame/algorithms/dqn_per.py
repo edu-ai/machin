@@ -29,7 +29,7 @@ Transition= namedtuple('Transition', ('state', 'action', 'reward', 'next_state')
 class ReplayBuffer:
     """Fixed-size buffer to store experience tuples."""
 
-    def __init__(self, action_size, buffer_size, batch_size, experiences_per_sampling, seed, compute_weights):
+    def __init__(self,  buffer_size, batch_size, experiences_per_sampling, seed, compute_weights):
         """Initialize a ReplayBuffer object.
         Params
         ======
@@ -39,7 +39,6 @@ class ReplayBuffer:
             batch_size (int): size of each training batch
             seed (int): random seed
         """
-        self.action_size = action_size
         self.buffer_size = buffer_size
         self.batch_size = batch_size
         self.experiences_per_sampling = experiences_per_sampling
@@ -76,7 +75,7 @@ class ReplayBuffer:
         for td, index in zip(tds, indices):
             N = min(self.experience_count, self.buffer_size)
 
-            updated_priority = td[0]
+            updated_priority = td
             if updated_priority > self.priorities_max:
                 self.priorities_max = updated_priority
             
@@ -89,7 +88,7 @@ class ReplayBuffer:
 
             old_priority = self.memory_data[index].priority
             self.priorities_sum_alpha += updated_priority**self.alpha - old_priority**self.alpha
-            updated_probability = td[0]**self.alpha / self.priorities_sum_alpha
+            updated_probability = td**self.alpha / self.priorities_sum_alpha
             data = self.data(updated_priority, updated_probability, updated_weight, index) 
             self.memory_data[index] = data
 
@@ -183,7 +182,7 @@ class ReplayBuffer:
         """Return the current size of internal memory."""
         return len(self.memory)
 
-class DQN_PER(TorchFramework):
+class DQNPer(TorchFramework):
     """
     DQN framework.
     """
@@ -362,7 +361,7 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
             self.qnet_optim = optimizer(self.qnet.parameters(), lr=learning_rate)
             print("failure")
         
-        self.replay_buffer = ReplayBuffer(replay_size)
+        self.replay_buffer = ReplayBuffer(replay_size,self.batch_size,160,0,False)
 
         # Make sure target and online networks have the same weight
         with t.no_grad():
@@ -539,7 +538,7 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
         """
         device = t.device('cuda' if t.cuda.is_available() else 'cpu')
         
-        batch, weights, indices = self.replay_buffer.sample(self.batch_size)
+        batch, weights, indices = self.replay_buffer.sample()
 
         # print("reward",terminal)
         #terminal  = terminal["terminal"] 
@@ -666,11 +665,11 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
             td_error = t.abs(state_action_values - expected_state_action_values)  # (32,)
             value_loss = smooth_l1_loss(state_action_values, expected_state_action_values)#y_i.type_as(action_value))
 
-            value_loss = value_loss * t.from_numpy(weights).view([self.batch_size, 1]).to(value_loss.device)
+            value_loss = value_loss * t.from_numpy(np.array(weights)).view([self.batch_size, 1]).to(value_loss.device)
             value_loss = value_loss.mean()
+            td_error = td_error.detach().cpu().numpy()
+            #delta = t.sum(td_error,dim=0).flatten().detach().cpu().numpy()
 
-            delta = t.sum(td_error,dim=1).flatten().detach().cpu().numpy()
-            
             if self.visualize:
                 self.visualize_model(value_loss, "qnet", self.visualize_dir)
 
@@ -681,7 +680,7 @@ edu/class/psych209/Readings/MnihEtAlHassibis15NatureControlDeepRL.pdf>`__ essay.
                 nn.utils.clip_grad_norm_(self.qnet.parameters(), self.grad_max)
                 self.qnet_optim.step()
 
-            self.replay_buffer.update_priorities(delta, indices) 
+            self.replay_buffer.update_priorities(td_error, indices) 
 
             # Update target Q network
             if update_target:

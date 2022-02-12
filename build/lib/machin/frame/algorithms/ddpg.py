@@ -3,10 +3,12 @@ from copy import deepcopy
 from torch.distributions import Categorical
 import torch as t
 import torch.nn as nn
+import random
 import numpy as np
-
+from collections import namedtuple
 from machin.frame.buffers.buffer import Buffer
-from machin.frame.transition import Transition
+from torchvision import transforms
+#from machin.frame.transition import Transition
 from machin.frame.noise.action_space_noise import (
     add_normal_noise_to_action,
     add_clipped_normal_noise_to_action,
@@ -27,6 +29,29 @@ from .utils import (
     assert_and_get_valid_lr_scheduler,
 )
 
+Transition_n = namedtuple('Transition', ('state', 'action', 'reward', 'next_state'))
+Transition= namedtuple('Transition', ('state', 'action', 'reward', 'next_state'))
+
+
+class ReplayBuffer:
+    def __init__(self, capacity):
+        self.capacity = capacity
+        self.buffer = []
+        self.position = 0
+
+    def push(self, *args):
+        if len(self.buffer) < self.capacity:
+            self.buffer.append(None)
+        self.buffer[self.position] = Transition_n(*args)
+        self.position = (self.position + 1) % self.capacity
+
+    def sample(self, batch_size):
+        transitions = random.sample(self.buffer, batch_size)
+        return Transition_n(*zip(*transitions))
+
+    def __len__(self):
+        return len(self.buffer)
+    
 
 class DDPG(TorchFramework):
     """
@@ -60,6 +85,10 @@ class DDPG(TorchFramework):
         replay_buffer: Buffer = None,
         visualize: bool = False,
         visualize_dir: str = "",
+        tau: float =1e-2, 
+        momentum: float =  1, 
+        weight_decay: float= 1,
+
         **__
     ):
         """
@@ -148,13 +177,24 @@ class DDPG(TorchFramework):
         self.actor_target = actor_target
         self.critic = critic
         self.critic_target = critic_target
-        self.actor_optim = optimizer(self.actor.parameters(), lr=actor_learning_rate)
-        self.critic_optim = optimizer(self.critic.parameters(), lr=critic_learning_rate)
-        self.replay_buffer = (
-            Buffer(replay_size, replay_device)
-            if replay_buffer is None
-            else replay_buffer
-        )
+
+        try: 
+            self.actor_optim = optimizer(self.actor.parameters(), lr=actor_learning_rate,momentum=momentum, weight_decay=weight_decay)
+            self.critic_optim = optimizer(self.critic.parameters(), lr=critic_learning_rate,momentum=momentum, weight_decay=weight_decay)
+            #self.qnet_optim = optimizer(self.qnet.parameters(), lr=learning_rate,momentum=momentum, weight_decay=weight_decay)
+            print("success")
+        except : 
+            self.actor_optim = optimizer(self.actor.parameters(), lr=actor_learning_rate)
+            self.critic_optim = optimizer(self.critic.parameters(), lr=critic_learning_rate)
+                
+            #self.qnet_optim = optimizer(self.qnet.parameters(), lr=learning_rate)
+            print("failure")
+        
+        
+        #self.actor_optim = optimizer(self.actor.parameters(), lr=actor_learning_rate)
+        #self.critic_optim = optimizer(self.critic.parameters(), lr=critic_learning_rate)
+        self.replay_buffer = ReplayBuffer(replay_size)
+        self.tau = tau 
 
         # Make sure target and online networks have the same weight
         with t.no_grad():
@@ -189,6 +229,11 @@ class DDPG(TorchFramework):
         if hasattr(self, "actor_lr_sch") and hasattr(self, "critic_lr_sch"):
             return [self.actor_lr_sch, self.critic_lr_sch]
         return []
+
+    
+    def apply_transform(self,s):
+        transform = transforms.ToTensor()
+        return transform(s).unsqueeze(0)
 
     def act(self, state: Dict[str, Any], use_target: bool = False, **__):
         """
@@ -254,6 +299,13 @@ class DDPG(TorchFramework):
             return noisy_action
         else:
             return (noisy_action, *others)
+    def soft_update_models(self): 
+        for target_param, param in zip(self.actor_target.parameters(), self.actor.parameters()):
+            target_param.data.copy_(param.data * self.tau + target_param.data * (1.0 - self.tau))
+       
+        for target_param, param in zip(self.critic_target.parameters(), self.critic.parameters()):
+            target_param.data.copy_(param.data * self.tau + target_param.data * (1.0 - self.tau))
+
 
     def act_discrete(self, state: Dict[str, Any], use_target: bool = False, **__):
         """
@@ -397,6 +449,7 @@ class DDPG(TorchFramework):
         """
         self.actor.train()
         self.critic.train()
+        '''
         (
             batch_size,
             (state, action, reward, next_state, terminal, others,),
@@ -406,35 +459,50 @@ class DDPG(TorchFramework):
             sample_method="random_unique",
             sample_attrs=["state", "action", "reward", "next_state", "terminal", "*"],
         )
+        '''
+        batch = self.replay_buffer.sample(self.batch_size)
+
+        device = t.device('cuda' if t.cuda.is_available() else 'cpu')
+        state_batch = t.cat([self.apply_transform(s) for s in batch.state]).to(device)  # (32, 4, 96, 96)
+        action_batch = t.tensor(batch.action, dtype=t.long).to(device)  # (32,)
+        reward_batch = t.tensor(batch.reward, dtype=t.float32).to(device)  # (32,)
+        non_final_next_states = t.cat([self.apply_transform(s) for s in batch.next_state if s is not None]).to(device, non_blocking=True)  # (<=32, 4, 96, 96)
+        next_state_values = t.zeros(self.batch_size, dtype=t.float32, device=device)  # (32,)
+        non_final_mask = t.tensor(tuple(map(lambda s: s is not None, batch.next_state)), dtype=t.bool, device=device)  # (32,)
 
         # Update critic network first.
         # Generate value reference :math: `y_i` using target actor and
         # target critic.
         with t.no_grad():
-            next_action = self.action_transform_function(
-                self._act(next_state, True), next_state, others
-            )
-            next_value = self._criticize(next_state, next_action, True)
-            next_value = next_value.view(batch_size, -1)
-            y_i = self.reward_function(
-                reward, self.discount, next_value, terminal, others
-            )
+            #next_action = self.action_transform_function(
+            #    self._act(next_state, True), next_state, others
+            #)
+            next_action = self.actor_target(non_final_next_states)
+            #print(next_action)
+            next_state_values[non_final_mask]  = self.critic_target(non_final_next_states,next_action).view(-1)
+            #next_value = self._criticize(next_state, next_action, True)
+            #print(next_state_values)
+            #next_value = next_value.view(batch_size, -1)
+            y_i = (reward_batch + self.discount * next_state_values)
+            #y_i = self.reward_function(
+            #    reward, self.discount, next_value, terminal, others
+            #)
 
-        cur_value = self._criticize(state, action)
+        cur_value = self.critic(state_batch,action_batch).view(-1) #self._criticize(state, action)
         value_loss = self.criterion(cur_value, y_i.type_as(cur_value))
 
         if self.visualize:
             self.visualize_model(value_loss, "critic", self.visualize_dir)
 
         if update_value:
-            self.critic.zero_grad()
+            self.critic_optim.zero_grad()
             self._backward(value_loss)
             nn.utils.clip_grad_norm_(self.critic.parameters(), self.gradient_max)
             self.critic_optim.step()
 
         # Update actor network
-        cur_action = self.action_transform_function(self._act(state), state, others)
-        act_value, *_ = self._criticize(state, cur_action)
+        cur_action =  self.actor(state_batch) #self.action_transform_function(self._act(state), state, others)
+        act_value, *_ = self.critic(state_batch,cur_action) #self._criticize(state, cur_action)
 
         # "-" is applied because we want to maximize J_b(u),
         # but optimizer workers by minimizing the target
@@ -444,12 +512,12 @@ class DDPG(TorchFramework):
             self.visualize_model(act_policy_loss, "actor", self.visualize_dir)
 
         if update_policy:
-            self.actor.zero_grad()
+            self.actor_optim.zero_grad()
             self._backward(act_policy_loss)
             nn.utils.clip_grad_norm_(self.actor.parameters(), self.gradient_max)
             self.actor_optim.step()
 
-        # Update target networks
+        # Update target networks    
         if update_target:
             if self.update_rate is not None:
                 soft_update(self.actor_target, self.actor, self.update_rate)
@@ -462,6 +530,7 @@ class DDPG(TorchFramework):
 
         self.actor.eval()
         self.critic.eval()
+
         # use .item() to prevent memory leakage
         return -act_policy_loss.item(), value_loss.item()
 
