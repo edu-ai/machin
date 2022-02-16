@@ -86,6 +86,9 @@ class MADDPG(TorchFramework):
         use_jit: bool = True,
         pool_type: str = "thread",
         pool_size: int = None,
+
+        momentum: float =  1, 
+        weight_decay: float= 1,
         **__,
     ):
         """
@@ -196,13 +199,28 @@ class MADDPG(TorchFramework):
         ]
         self.critics = critics
         self.critic_targets = critic_targets
-        self.actor_optims = [
-            [optimizer(acc.parameters(), lr=actor_learning_rate) for acc in ac]
-            for ac in self.actors
-        ]
-        self.critic_optims = [
-            optimizer(cr.parameters(), lr=critic_learning_rate) for cr in self.critics
-        ]
+        try: 
+            self.actor_optims = [
+                [optimizer(acc.parameters(), lr=actor_learning_rate,momentum=momentum, weight_decay=weight_decay) for acc in ac]
+                for ac in self.actors
+            ]
+            self.critic_optims = [
+                optimizer(cr.parameters(), lr=critic_learning_rate,momentum=momentum, weight_decay=weight_decay) for cr in self.critics
+            ]
+            #self.qnet_optim = optimizer(self.qnet.parameters(), lr=learning_rate,momentum=momentum, weight_decay=weight_decay)
+            print("success")
+        except : 
+            self.actor_optims = [
+                [optimizer(acc.parameters(), lr=actor_learning_rate) for acc in ac]
+                for ac in self.actors
+            ]
+            self.critic_optims = [
+                optimizer(cr.parameters(), lr=critic_learning_rate) for cr in self.critics
+            ]
+                
+            #self.qnet_optim = optimizer(self.qnet.parameters(), lr=learning_rate)
+            print("failure")
+
         self.ensemble_size = sub_policy_num + 1
         self.replay_buffers = [
             SHMBuffer(replay_size, replay_device)
